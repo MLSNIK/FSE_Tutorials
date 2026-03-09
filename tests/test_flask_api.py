@@ -14,8 +14,6 @@ def client():
         yield client
 
 
-
-
 def test_financial_charts_endpoint(client):
     """Test that /api/financial_charts returns chart paths."""
     mock_charts = {
