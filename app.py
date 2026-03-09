@@ -1,150 +1,116 @@
-from decimal import Decimal
-import os
 from loguru import logger
-from flask import jsonify, redirect, render_template, request, url_for, flash
 
-from helpers.analysis import (
-    add_transaction_to_db,
-    display_transactions_by_category,
-    generate_financial_charts,
-    generate_text_report,
-    get_category_names,
-    get_transactions_by_category,
-    get_all_transactions,
-    get_largest_expense,
-    get_average_transaction_amount,
-)
-from helpers.config import create_app
-
-# FLASK APP SETUP
-app = create_app(__name__)
+from transactions import Transaction, Category, calculate_financial_summary
+from database import get_session
+from sqlalchemy import select
+from decimal import Decimal
 
 
 def main():
     logger.add("logs/app.log", rotation="1 MB")
+    # Initialize database and create tables
+    # Get a session
+    session = get_session()
 
-    display_transactions_by_category("Job")
-    display_transactions_by_category("Groceries")
-    generate_financial_charts()
-    logger.info("Financial Report:\n{}", generate_text_report())
-
-
-# FLASK APP
-
-
-@app.route("/")
-def dashboard():
-    """Main dashboard with Jinja2 template."""
-    # Get all transactions
-    transactions = get_all_transactions()
-    # Get financial report
-    report = generate_text_report()
-    # Generate charts and get paths
-    charts = generate_financial_charts()
-    chart_paths = {}
-    for key, path in charts.items():
-        if path:
-            chart_paths[key] = f"/static/{os.path.basename(path)}"
-    largest_expense = get_largest_expense()
-
-    avg_transaction = get_average_transaction_amount()
-
-    category_names = get_category_names()
-
-    return render_template(
-        "dashboard.html",
-        transactions=transactions,
-        report=report,
-        chart_paths=chart_paths,
-        largest_expense=largest_expense,
-        avg_transaction=avg_transaction,
-        category_names=category_names,
-    )
-
-
-@app.route("/transaction/add", methods=["POST"])
-def add_transaction():
-    """Handle adding a new transaction."""
     try:
-        # Extract form data
-        date_str = request.form.get("date")
-        description = request.form.get("description")
-        amount = Decimal(request.form.get("amount", "0"))
-        category = request.form.get("category")
-        transaction_type = request.form.get("transaction_type")
+        # Ensure transaction table exists by querying it
+        session.query(Transaction).first()
 
-        # Make amount negative for expenses
-        if transaction_type == "expense" and amount > 0:
-            amount = -amount
+        # Query all transactions from the database
+        all_transactions = session.query(Transaction).all()
 
-        add_transaction_to_db(
-            date=date_str,
-            description=description,
-            amount=amount,
-            category_name=category,
+        # Calculate and display summary
+        summary = calculate_financial_summary(all_transactions)
+        print("Financial Summary:")
+        for key, value in summary.items():
+            print(f"{key.replace('_', ' ').title()}: {value}")
+    except Exception as e:
+        logger.error(
+            f"You may need to seed the database first, run 'python seed.py' and try again.\n\n"
         )
-        flash("Transaction added successfully!", "success")
-    except Exception as e:
-        logger.error(f"Error adding transaction: {e}")
-        flash(f"Error adding transaction: {str(e)}", "error")
+        raise e
 
-    return redirect(url_for("dashboard"))
+    finally:
+        session.close()
+        # TODO: Once you have added the Entertainment category and sample  expenses, uncomment the lines below to display them!
+        # display_transactions_by_category("Job")
+        # display_transactions_by_category("Entertainment")
 
 
-@app.route("/category/add", methods=["POST"])
-def add_category():
-    """Handle adding a new category."""
+# TODO: Add the entertainment category, if it does not already exist
+# NOTE: This means checking if a category with that name exists first
+def add_entertainment_category():
+    session = get_session()
     try:
-        category_name = request.form.get("category_name", "").strip()
+        # check if entertainment exists already
+        category_exists = session.query(Category).filter_by(name = 'Entertainment').first()
+        if category_exists: 
+            return
+        session.add(Category(name="Entertainment"))
+        session.commit()
+    finally:
+        session.close()
 
-        if not category_name:
-            flash("Category name cannot be empty", "error")
-        else:
-            from helpers.analysis import add_category_to_db
 
-            add_category_to_db(category_name)
-            flash(f'Category "{category_name}" added successfully!', "success")
+# TODO: Add sample entertainment expenses
+# NOTE: Fetch the Entertainment category first, then add two sample expenses linked to that category
+def add_entertainment_expenses():
+    session = get_session()
+    try:
+        # step 1: check if entertainment category exists
+        entertainment_category = session.query(Category).filter_by(name="Entertainment").first()
+        # step 2: if it exists, add two sample expenses linked to that category
+        if entertainment_category:
+            expenses = [
+                Transaction(
+                    date="2024-02-15",
+                    description="Movie Tickets",
+                    amount=Decimal("-600.00"),
+                    category_ref=entertainment_category,
+                ),
+                Transaction(
+                    date="2024-02-20",
+                    description="Concert",
+                    amount=Decimal("-300.00"),
+                    category_ref=entertainment_category,
+                ),
+            ]
+            session.add_all(expenses)
+            session.commit()
+        
+
+        # step 3: Add the expenses to the databasse, and commit the changes
+    finally:
+        session.close()
+
+
+# TODO: Display all transactions for a given category name
+def display_transactions_by_category(category_name: str):
+    session = get_session()
+    try:
+        category = session.query(Category).filter_by(name=category_name).first()
+        if not category:
+            logger.warning(f"Category '{category_name}' not found.")
+            transactions = session.query(Transaction).filter_by(category_id=category.id).all() if category else []
+
+        transactions = session.query(Transaction).filter_by(category_id=category.id).all()
+        if not transactions:
+            print(f"No transactions found for category '{category_name}'")
+            return
+
+        print(f"Transactions in category '{category_name}':")
+        for transaction in transactions:
+            print(
+                f"{transaction.date} - {transaction.description}: {transaction.amount}"
+            )
     except Exception as e:
-        logger.error(f"Error adding category: {e}")
-        flash(f"Error adding category: {str(e)}", "error")
-
-    return redirect(url_for("dashboard"))
-
-
-# API ENDPOINTS
-
-
-@app.route("/api/financial_summary", methods=["GET"])
-def api_financial_summary():
-    """API endpoint to get the student-facing text report."""
-    return jsonify(generate_text_report())
-
-
-@app.route("/api/transactions", methods=["GET"])
-def api_transactions_by_category():
-    """API endpoint to get transactions filtered by category."""
-    category = request.args.get("category")
-    if not category:
-        return jsonify({"error": "Category query parameter is required"}), 400
-    return jsonify(get_transactions_by_category(category))
-
-
-@app.route("/api/category", methods=["GET"])
-def api_categories():
-    """API endpoint to get a list of all categories."""
-    return jsonify(get_category_names())
-
-
-@app.route("/api/financial_charts", methods=["GET"])
-def api_financial_charts():
-    """Optionally generate charts and return web-friendly paths."""
-    charts = generate_financial_charts()
-    web_paths = {}
-    for key, path in charts.items():
-        if path:
-            web_paths[key] = f"/static/{os.path.basename(path)}"
-    return jsonify(web_paths)
+        logger.error(
+            f"Error displaying transactions for category '{category_name}': {e}"
+        )
+    finally:
+        session.close()
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    main()
+
